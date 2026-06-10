@@ -8,16 +8,23 @@
 
 #include "Generators.h"
 #include "Representation.h"
+#include "support/Markdown.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Allocator.h"
+#include "llvm/Support/DebugLog.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
 
+#define DEBUG_TYPE "clang-doc"
+
 using namespace llvm;
-using namespace clang::doc;
+
+namespace clang {
+namespace doc {
 
 // Markdown generation
 
@@ -52,12 +59,10 @@ static void writeHeader(const Twine &Text, unsigned int Num, raw_ostream &OS) {
 
 static void writeSourceFileRef(const ClangDocContext &CDCtx, const Location &L,
                                raw_ostream &OS) {
-
   if (!CDCtx.RepositoryUrl) {
     OS << "*Defined at " << L.Filename << "#"
        << std::to_string(L.StartLineNumber) << "*";
   } else {
-
     OS << formatv("*Defined at [#{0}{1}{2}](#{0}{1}{3})*",
                   CDCtx.RepositoryLinePrefix.value_or(""), L.StartLineNumber,
                   L.Filename, *CDCtx.RepositoryUrl);
@@ -146,6 +151,40 @@ static void maybeWriteSourceFileRef(llvm::raw_ostream &OS,
     writeSourceFileRef(CDCtx, *DefLoc, OS);
 }
 
+/// Writes a single parsed Markdown node to the output stream.
+///
+/// Currently handles fenced code blocks and plain text. All other node
+/// kinds fall back to emitting their content as plain text so that
+/// unrecognised constructs never produce empty output.
+static void writeMDNode(const markdown::MDNode &Node, raw_ostream &OS) {
+  switch (Node.Kind) {
+  case markdown::NodeKind::NK_FencedCode:
+    // Emit a Markdown fenced code block, preserving the language tag if one
+    // was present on the opening fence line.
+    OS << "\n```";
+    if (!Node.Content.empty())
+      OS << Node.Content;
+    OS << "\n";
+    for (const auto &Line : Node.Children)
+      OS << Line.Content << "\n";
+    OS << "```\n\n";
+    break;
+
+  case markdown::NodeKind::NK_Text:
+    OS << Node.Content;
+    break;
+
+  default:
+    // Unhandled node kinds: emit content and recurse into children so
+    // nothing is silently dropped.
+    if (!Node.Content.empty())
+      OS << Node.Content;
+    for (const auto &Child : Node.Children)
+      writeMDNode(Child, OS);
+    break;
+  }
+}
+
 static void writeDescription(const CommentInfo &I, raw_ostream &OS) {
   switch (I.Kind) {
   case CommentKind::CK_FullComment:
@@ -153,11 +192,55 @@ static void writeDescription(const CommentInfo &I, raw_ostream &OS) {
       writeDescription(Child, OS);
     break;
 
-  case CommentKind::CK_ParagraphComment:
+  case CommentKind::CK_ParagraphComment: {
+    // Clang's comment parser represents each line of a documentation
+    // paragraph as a separate CK_TextComment child. To parse Markdown
+    // constructs that span multiple lines (e.g. fenced code blocks),
+    // we concatenate all text-only children and attempt to parse the
+    // result as Markdown before falling back to plain-text emission.
+    //
+    // If the paragraph contains non-text children (inline commands,
+    // HTML tags, etc.) we skip Markdown parsing entirely and fall back
+    // to the original recursive approach so existing behaviour is
+    // preserved.
+    bool AllTextChildren = true;
+    for (const auto &Child : I.Children)
+      if (Child.Kind != CommentKind::CK_TextComment) {
+        AllTextChildren = false;
+        break;
+      }
+
+    if (AllTextChildren && !I.Children.empty()) {
+      std::string ParagraphText;
+      llvm::raw_string_ostream TextOS(ParagraphText);
+      for (const auto &Child : I.Children)
+        if (!Child.Text.empty())
+          TextOS << Child.Text << "\n";
+
+      // The allocator is scoped to this paragraph; nodes must not outlive it.
+      llvm::BumpPtrAllocator Arena;
+      auto Nodes = markdown::parseMarkdown(ParagraphText, Arena);
+
+      LDBG() << "paragraph -> " << Nodes.size() << " Markdown node(s)";
+
+      bool HasMarkdown = llvm::any_of(Nodes, [](const markdown::MDNode &N) {
+        return N.Kind != markdown::NodeKind::NK_Text;
+      });
+
+      if (HasMarkdown) {
+        for (const auto &Node : Nodes)
+          writeMDNode(Node, OS);
+        writeNewLine(OS);
+        break;
+      }
+    }
+
+    // Fall back: emit children recursively (original behaviour).
     for (const auto &Child : I.Children)
       writeDescription(Child, OS);
     writeNewLine(OS);
     break;
+  }
 
   case CommentKind::CK_BlockCommandComment:
     OS << genEmphasis(I.Name) << " ";
@@ -493,35 +576,32 @@ static llvm::Error genIndex(ClangDocContext &CDCtx) {
   return llvm::Error::success();
 }
 
-namespace {
 /// Generator for Markdown documentation.
 class MDGenerator : public Generator {
 public:
-  static StringRef Format;
+  static const char *Format;
 
   llvm::Error generateDocumentation(StringRef RootDir,
-                                    llvm::StringMap<Info *> Infos,
+                                    llvm::StringMap<doc::Info *> Infos,
                                     const ClangDocContext &CDCtx,
                                     std::string DirName) override;
   llvm::Error createResources(ClangDocContext &CDCtx) override;
   llvm::Error generateDocForInfo(Info *I, llvm::raw_ostream &OS,
                                  const ClangDocContext &CDCtx) override;
 };
-} // namespace
 
-StringRef MDGenerator::Format = "md";
+const char *MDGenerator::Format = "md";
 
-llvm::Error MDGenerator::generateDocumentation(StringRef RootDir,
-                                               llvm::StringMap<Info *> Infos,
-                                               const ClangDocContext &CDCtx,
-                                               std::string DirName) {
+llvm::Error MDGenerator::generateDocumentation(
+    StringRef RootDir, llvm::StringMap<doc::Info *> Infos,
+    const ClangDocContext &CDCtx, std::string DirName) {
   // Track which directories we already tried to create.
   llvm::StringSet<> CreatedDirs;
 
   // Collect all output by file name and create the necessary directories.
-  llvm::StringMap<std::vector<Info *>> FileToInfos;
+  llvm::StringMap<std::vector<doc::Info *>> FileToInfos;
   for (const auto &Group : Infos) {
-    Info *Info = Group.getValue();
+    doc::Info *Info = Group.getValue();
 
     llvm::SmallString<128> Path;
     llvm::sys::path::native(RootDir, Path);
@@ -562,19 +642,19 @@ llvm::Error MDGenerator::generateDocForInfo(Info *I, llvm::raw_ostream &OS,
                                             const ClangDocContext &CDCtx) {
   switch (I->IT) {
   case InfoType::IT_namespace:
-    genMarkdown(CDCtx, *cast<NamespaceInfo>(I), OS);
+    genMarkdown(CDCtx, *static_cast<clang::doc::NamespaceInfo *>(I), OS);
     break;
   case InfoType::IT_record:
-    genMarkdown(CDCtx, *cast<RecordInfo>(I), OS);
+    genMarkdown(CDCtx, *static_cast<clang::doc::RecordInfo *>(I), OS);
     break;
   case InfoType::IT_enum:
-    genMarkdown(CDCtx, *cast<EnumInfo>(I), OS);
+    genMarkdown(CDCtx, *static_cast<clang::doc::EnumInfo *>(I), OS);
     break;
   case InfoType::IT_function:
-    genMarkdown(CDCtx, *cast<FunctionInfo>(I), OS);
+    genMarkdown(CDCtx, *static_cast<clang::doc::FunctionInfo *>(I), OS);
     break;
   case InfoType::IT_typedef:
-    genMarkdown(CDCtx, *cast<TypedefInfo>(I), OS);
+    genMarkdown(CDCtx, *static_cast<clang::doc::TypedefInfo *>(I), OS);
     break;
   case InfoType::IT_concept:
   case InfoType::IT_variable:
@@ -603,9 +683,6 @@ llvm::Error MDGenerator::createResources(ClangDocContext &CDCtx) {
 
 static GeneratorRegistry::Add<MDGenerator> MD(MDGenerator::Format,
                                               "Generator for MD output.");
-
-namespace clang {
-namespace doc {
 
 // This anchor is used to force the linker to link in the generated object
 // file and thus register the generator.
