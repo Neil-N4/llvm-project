@@ -15,8 +15,10 @@
 ///
 //===----------------------------------------------------------------------===//
 #include "Generators.h"
+#include "support/Markdown.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/Allocator.h"
 #include "llvm/Support/JSON.h"
 
 using namespace llvm;
@@ -329,6 +331,73 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
   case CommentKind::CK_ParagraphComment: {
     Child.insert({"Children", ChildArr});
     Child["ParagraphComment"] = true;
+
+    // Attempt to parse Markdown from plain-text paragraph children.
+    // Only runs when all children are CK_TextComment -- paragraphs with
+    // inline commands or HTML tags fall back to the raw Children array.
+    bool AllTextChildren = llvm::all_of(I.Children, [](const CommentInfo &C) {
+      return C.Kind == CommentKind::CK_TextComment;
+    });
+    if (AllTextChildren && !I.Children.empty()) {
+      std::string ParagraphText;
+      llvm::raw_string_ostream TextOS(ParagraphText);
+      for (const auto &C : I.Children)
+        if (!C.Text.empty())
+          TextOS << C.Text << "\n";
+
+      llvm::BumpPtrAllocator Arena;
+      auto MDNodes = markdown::parseMarkdown(ParagraphText, Arena);
+
+      bool HasMarkdown = llvm::any_of(MDNodes, [](const markdown::MDNode *N) {
+        return !llvm::isa<markdown::TextNode>(N);
+      });
+
+      if (HasMarkdown) {
+        json::Array ParsedArray;
+        for (const auto *Node : MDNodes) {
+          if (const auto *FC = llvm::dyn_cast<markdown::FencedCodeNode>(Node)) {
+            json::Object FCObj;
+            FCObj["Type"] = "FencedCode";
+            FCObj["Lang"] = FC->Lang.str();
+            json::Array Lines;
+            for (const auto &Line : FC->Lines)
+              Lines.push_back(Line.str());
+            FCObj["Lines"] = std::move(Lines);
+            ParsedArray.push_back(std::move(FCObj));
+          } else if (const auto *T =
+                         llvm::dyn_cast<markdown::TableNode>(Node)) {
+            json::Object TObj;
+            TObj["Type"] = "Table";
+            json::Array Rows;
+            for (const auto &Row : T->Rows)
+              Rows.push_back(Row.str());
+            TObj["Rows"] = std::move(Rows);
+            ParsedArray.push_back(std::move(TObj));
+          } else if (const auto *UL =
+                         llvm::dyn_cast<markdown::UnorderedListNode>(Node)) {
+            json::Object ULObj;
+            ULObj["Type"] = "UnorderedList";
+            json::Array Items;
+            for (const auto *Item : UL->Items) {
+              if (!Item->Children.empty()) {
+                if (const auto *TN =
+                        llvm::dyn_cast<markdown::TextNode>(Item->Children[0]))
+                  Items.push_back(TN->Text.str());
+              }
+            }
+            ULObj["Items"] = std::move(Items);
+            ParsedArray.push_back(std::move(ULObj));
+          } else if (const auto *TN =
+                         llvm::dyn_cast<markdown::TextNode>(Node)) {
+            json::Object TxtObj;
+            TxtObj["Type"] = "Text";
+            TxtObj["Text"] = TN->Text.str();
+            ParsedArray.push_back(std::move(TxtObj));
+          }
+        }
+        Child["ParsedMarkdown"] = std::move(ParsedArray);
+      }
+    }
     return Child;
   }
 
@@ -422,6 +491,8 @@ static void serializeDescription(const DocList<CommentInfo> &Description,
           TextCommentsArray.getAsArray()->empty())
         continue;
       insertComment(DescriptionObj, TextCommentsArray, "ParagraphComments");
+      if (auto *Parsed = ParagraphComment->get("ParsedMarkdown"))
+        DescriptionObj["ParsedMarkdown"] = std::move(*Parsed);
     }
   }
   Obj["Description"] = std::move(DescriptionObj);
