@@ -361,57 +361,45 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
       scope_exit ArenaGuard([] { getTransientArena().Reset(); });
       auto MDNodes = markdown::parseMarkdown(ParagraphText, Arena);
 
-      bool HasMarkdown = llvm::any_of(MDNodes, [](const markdown::MDNode *N) {
-        return !llvm::isa<markdown::TextNode>(N);
-      });
-
-      if (HasMarkdown) {
-        json::Array ParsedArray;
-        for (const auto *Node : MDNodes) {
-          if (const auto *FC = llvm::dyn_cast<markdown::FencedCodeNode>(Node)) {
-            json::Object FCObj;
-            FCObj["Type"] = "FencedCode";
-            FCObj["Lang"] = FC->Lang.str();
-            json::Array Lines;
-            Lines.reserve(FC->Lines.size());
-            for (const auto &Line : FC->Lines)
-              Lines.push_back(Line.str());
-            FCObj["Lines"] = std::move(Lines);
-            ParsedArray.push_back(std::move(FCObj));
-          } else if (const auto *T =
-                         llvm::dyn_cast<markdown::TableNode>(Node)) {
-            json::Object TObj;
-            TObj["Type"] = "Table";
-            json::Array Rows;
-            Rows.reserve(T->Rows.size());
-            for (const auto &Row : T->Rows)
-              Rows.push_back(Row.str());
-            TObj["Rows"] = std::move(Rows);
-            ParsedArray.push_back(std::move(TObj));
-          } else if (const auto *UL =
-                         llvm::dyn_cast<markdown::UnorderedListNode>(Node)) {
-            json::Object ULObj;
-            ULObj["Type"] = "UnorderedList";
-            json::Array Items;
-            for (const auto *Item : UL->Items) {
-              if (!Item->Children.empty()) {
-                if (const auto *TN =
-                        llvm::dyn_cast<markdown::TextNode>(Item->Children[0]))
-                  Items.push_back(TN->Text.str());
-              }
+      json::Array ParsedArray;
+      for (const auto *Node : MDNodes) {
+        if (const auto *FC = llvm::dyn_cast<markdown::FencedCodeNode>(Node)) {
+          json::Object FCObj;
+          FCObj["Type"] = "FencedCode";
+          FCObj["Lang"] = FC->Lang.str();
+          json::Array Lines;
+          Lines.reserve(FC->Lines.size());
+          for (const auto &Line : FC->Lines)
+            Lines.push_back(Line.str());
+          FCObj["Lines"] = std::move(Lines);
+          ParsedArray.push_back(std::move(FCObj));
+        } else if (const auto *T = llvm::dyn_cast<markdown::TableNode>(Node)) {
+          json::Object TObj;
+          TObj["Type"] = "Table";
+          json::Array Rows;
+          Rows.reserve(T->Rows.size());
+          for (const auto &Row : T->Rows)
+            Rows.push_back(Row.str());
+          TObj["Rows"] = std::move(Rows);
+          ParsedArray.push_back(std::move(TObj));
+        } else if (const auto *UL =
+                       llvm::dyn_cast<markdown::UnorderedListNode>(Node)) {
+          json::Object ULObj;
+          ULObj["Type"] = "UnorderedList";
+          json::Array Items;
+          for (const auto *Item : UL->Items) {
+            if (!Item->Children.empty()) {
+              if (const auto *TN =
+                      llvm::dyn_cast<markdown::TextNode>(Item->Children[0]))
+                Items.push_back(TN->Text.str());
             }
-            ULObj["Items"] = std::move(Items);
-            ParsedArray.push_back(std::move(ULObj));
-          } else if (const auto *TN =
-                         llvm::dyn_cast<markdown::TextNode>(Node)) {
-            json::Object TxtObj;
-            TxtObj["Type"] = "Text";
-            TxtObj["Text"] = TN->Text.str();
-            ParsedArray.push_back(std::move(TxtObj));
           }
+          ULObj["Items"] = std::move(Items);
+          ParsedArray.push_back(std::move(ULObj));
         }
-        Child["ParsedMarkdown"] = std::move(ParsedArray);
       }
+      if (!ParsedArray.empty())
+        Child["ParsedMarkdown"] = std::move(ParsedArray);
     }
     return Child;
   }
