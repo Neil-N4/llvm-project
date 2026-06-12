@@ -332,9 +332,16 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
     Child.insert({"Children", ChildArr});
     Child["ParagraphComment"] = true;
 
-    // Attempt to parse Markdown from plain-text paragraph children.
-    // Only runs when all children are CK_TextComment -- paragraphs with
-    // inline commands or HTML tags fall back to the raw Children array.
+    // Attempt to parse Markdown from a paragraph whose children are all plain
+    // text. Paragraphs that contain inline commands or HTML tags fall back to
+    // the raw Children array.
+    //
+    // Block commands like \brief, \return, and \param are
+    // CK_BlockCommandComment and CK_ParamCommandComment, handled in their own
+    // cases above. Their nested body paragraph still passes through here, but
+    // serializeDescription only promotes ParsedMarkdown from top-level
+    // paragraph comments, so a block command never contributes ParsedMarkdown
+    // to the output.
     bool AllTextChildren = llvm::all_of(I.Children, [](const CommentInfo &C) {
       return C.Kind == CommentKind::CK_TextComment;
     });
@@ -345,9 +352,11 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
         if (!C.Text.empty())
           TextOS << C.Text << "\n";
 
-      // Parse into the thread-local transient arena and reset it on scope
-      // exit. Every StringRef pulled out of the nodes is copied with .str()
-      // before this block ends, so the nodes need not outlive the reset.
+      // Parse into the thread-local transient arena. The scope_exit guard
+      // resets that arena when this block ends. Every StringRef taken from the
+      // parsed nodes (Lang, Lines, Rows, and item or text contents) is copied
+      // into the JSON with .str() before the guard fires, so nothing in the
+      // JSON output points into arena memory once it is reset.
       BumpPtrAllocator &Arena = getTransientArena();
       scope_exit ArenaGuard([] { getTransientArena().Reset(); });
       auto MDNodes = markdown::parseMarkdown(ParagraphText, Arena);
@@ -364,6 +373,7 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
             FCObj["Type"] = "FencedCode";
             FCObj["Lang"] = FC->Lang.str();
             json::Array Lines;
+            Lines.reserve(FC->Lines.size());
             for (const auto &Line : FC->Lines)
               Lines.push_back(Line.str());
             FCObj["Lines"] = std::move(Lines);
@@ -373,6 +383,7 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
             json::Object TObj;
             TObj["Type"] = "Table";
             json::Array Rows;
+            Rows.reserve(T->Rows.size());
             for (const auto &Row : T->Rows)
               Rows.push_back(Row.str());
             TObj["Rows"] = std::move(Rows);
