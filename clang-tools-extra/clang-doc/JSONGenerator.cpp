@@ -18,7 +18,7 @@
 #include "support/Markdown.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/Support/Allocator.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/JSON.h"
 
 using namespace llvm;
@@ -345,7 +345,11 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
         if (!C.Text.empty())
           TextOS << C.Text << "\n";
 
-      llvm::BumpPtrAllocator Arena;
+      // Parse into the thread-local transient arena and reset it on scope
+      // exit. Every StringRef pulled out of the nodes is copied with .str()
+      // before this block ends, so the nodes need not outlive the reset.
+      BumpPtrAllocator &Arena = getTransientArena();
+      scope_exit ArenaGuard([] { getTransientArena().Reset(); });
       auto MDNodes = markdown::parseMarkdown(ParagraphText, Arena);
 
       bool HasMarkdown = llvm::any_of(MDNodes, [](const markdown::MDNode *N) {
