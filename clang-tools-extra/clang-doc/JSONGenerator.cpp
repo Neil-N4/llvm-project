@@ -547,6 +547,7 @@ static void serializeDescription(const DocList<CommentInfo> &Description,
   // Skip straight to the FullComment's children
   auto &Comments = Description.front()->Children;
   Object DescriptionObj = Object();
+  json::Array ParsedMarkdown;
   for (const auto &CommentInfo : Comments) {
     json::Value Comment = serializeComment(CommentInfo, DescriptionObj);
     // if a ParagraphComment is returned, then it is a top-level comment that
@@ -558,10 +559,16 @@ static void serializeDescription(const DocList<CommentInfo> &Description,
           TextCommentsArray.getAsArray()->empty())
         continue;
       insertComment(DescriptionObj, TextCommentsArray, "ParagraphComments");
+      // Accumulate each paragraph's parsed nodes into one array instead of
+      // letting a later paragraph overwrite an earlier one's ParsedMarkdown.
       if (auto *Parsed = ParagraphComment->get("ParsedMarkdown"))
-        DescriptionObj["ParsedMarkdown"] = std::move(*Parsed);
+        if (auto *ParsedArr = Parsed->getAsArray())
+          for (auto &Node : *ParsedArr)
+            ParsedMarkdown.push_back(std::move(Node));
     }
   }
+  if (!ParsedMarkdown.empty())
+    DescriptionObj["ParsedMarkdown"] = std::move(ParsedMarkdown);
   Obj["Description"] = std::move(DescriptionObj);
   if (!Key.empty())
     Obj[Key] = true;
