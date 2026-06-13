@@ -249,11 +249,19 @@ serializeMarkdownNode(const markdown::MDNode *Node) {
   if (const auto *T = llvm::dyn_cast<markdown::TableNode>(Node)) {
     json::Object Obj;
     Obj["Type"] = "Table";
-    json::Array Rows;
-    Rows.reserve(T->Rows.size());
-    for (const auto &Row : T->Rows)
-      Rows.push_back(Row.str());
-    Obj["Rows"] = std::move(Rows);
+    auto serializeRow = [](const markdown::TableRow &Row) {
+      json::Array Cells;
+      Cells.reserve(Row.Cells.size());
+      for (const auto &Cell : Row.Cells)
+        Cells.push_back(markdownInlineText(Cell.Children));
+      return Cells;
+    };
+    Obj["Header"] = serializeRow(T->Header);
+    json::Array Body;
+    Body.reserve(T->Body.size());
+    for (const auto &Row : T->Body)
+      Body.push_back(serializeRow(Row));
+    Obj["Body"] = std::move(Body);
     return Obj;
   }
   if (const auto *UL = llvm::dyn_cast<markdown::UnorderedListNode>(Node)) {
@@ -444,9 +452,9 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
 
       // Parse into the thread-local transient arena. The scope_exit guard
       // resets that arena when this block ends. Every StringRef taken from the
-      // parsed nodes (Lang, Lines, Rows, and item or text contents) is copied
-      // into the JSON with .str() before the guard fires, so nothing in the
-      // JSON output points into arena memory once it is reset.
+      // parsed nodes (Lang, Lines, table cells, and item or text contents) is
+      // copied into the JSON with .str() before the guard fires, so nothing in
+      // the JSON output points into arena memory once it is reset.
       BumpPtrAllocator &Arena = getTransientArena();
       scope_exit ArenaGuard([] { getTransientArena().Reset(); });
       auto MDNodes = markdown::parseMarkdown(ParagraphText, Arena);
