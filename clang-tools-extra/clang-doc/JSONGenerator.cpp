@@ -393,11 +393,14 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
           ULObj["Type"] = "UnorderedList";
           json::Array Items;
           for (const auto *Item : UL->Items) {
-            if (!Item->Children.empty()) {
-              if (const auto *TN =
-                      llvm::dyn_cast<markdown::TextNode>(Item->Children[0]))
-                Items.push_back(TN->Text.str());
-            }
+            // Item children are inline nodes from parseInline. Concatenate the
+            // text of the TextNode children, skipping non-text inline nodes
+            // (emphasis, code spans) for now.
+            std::string ItemText;
+            for (const auto *Child : Item->Children)
+              if (const auto *TN = llvm::dyn_cast<markdown::TextNode>(Child))
+                ItemText.append(TN->Text.data(), TN->Text.size());
+            Items.push_back(std::move(ItemText));
           }
           ULObj["Items"] = std::move(Items);
           ParsedArray.push_back(std::move(ULObj));
