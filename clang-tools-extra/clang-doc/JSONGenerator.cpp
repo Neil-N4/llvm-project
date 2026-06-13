@@ -363,6 +363,11 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
 
       json::Array ParsedArray;
       for (const auto *Node : MDNodes) {
+        // A ParagraphNode wraps the plain-text runs of the paragraph. That text
+        // is already serialized into the Children array above, so there is
+        // nothing structured to add to ParsedMarkdown; skip it.
+        if (llvm::isa<markdown::ParagraphNode>(Node))
+          continue;
         if (const auto *FC = llvm::dyn_cast<markdown::FencedCodeNode>(Node)) {
           json::Object FCObj;
           FCObj["Type"] = "FencedCode";
