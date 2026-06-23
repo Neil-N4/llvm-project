@@ -15,8 +15,10 @@
 ///
 //===----------------------------------------------------------------------===//
 #include "Generators.h"
+#include "support/Markdown.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/JSON.h"
 
 using namespace llvm;
@@ -217,6 +219,104 @@ static json::Value extractVerbatimComments(json::Array VerbatimLines) {
   return TextArray;
 }
 
+// Concatenates the text of a block's inline TextNode children, skipping
+// non-text inline nodes (emphasis, code spans) for now.
+static std::string markdownInlineText(ArrayRef<markdown::MDNode *> Children) {
+  std::string Text;
+  for (const auto *Child : Children)
+    if (const auto *TN = llvm::dyn_cast<markdown::TextNode>(Child))
+      Text.append(TN->Text.data(), TN->Text.size());
+  return Text;
+}
+
+// Serializes a single parsed Markdown block node into a JSON object for the
+// ParsedMarkdown array. Returns nullopt for nodes with no structured form. All
+// strings are copied here, so the result does not depend on the arena that
+// produced Node. Block quotes recurse through this helper.
+static std::optional<json::Object>
+serializeMarkdownNode(const markdown::MDNode *Node) {
+  if (const auto *FC = llvm::dyn_cast<markdown::FencedCodeNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "FencedCode";
+    Obj["Lang"] = FC->Lang.str();
+    json::Array Lines;
+    Lines.reserve(FC->Lines.size());
+    for (const auto &Line : FC->Lines)
+      Lines.push_back(Line.str());
+    Obj["Lines"] = std::move(Lines);
+    return Obj;
+  }
+  if (const auto *T = llvm::dyn_cast<markdown::TableNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "Table";
+    auto serializeRow = [](const markdown::TableRow &Row) {
+      json::Array Cells;
+      Cells.reserve(Row.Cells.size());
+      for (const auto &Cell : Row.Cells)
+        Cells.push_back(markdownInlineText(Cell.Children));
+      return Cells;
+    };
+    Obj["Header"] = serializeRow(T->Header);
+    json::Array Body;
+    Body.reserve(T->Body.size());
+    for (const auto &Row : T->Body)
+      Body.push_back(serializeRow(Row));
+    Obj["Body"] = std::move(Body);
+    return Obj;
+  }
+  if (const auto *UL = llvm::dyn_cast<markdown::UnorderedListNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "UnorderedList";
+    json::Array Items;
+    for (const auto *Item : UL->Items)
+      Items.push_back(markdownInlineText(Item->Children));
+    Obj["Items"] = std::move(Items);
+    return Obj;
+  }
+  if (const auto *OL = llvm::dyn_cast<markdown::OrderedListNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "OrderedList";
+    Obj["Start"] = static_cast<int64_t>(OL->Start);
+    json::Array Items;
+    for (const auto *Item : OL->Items)
+      Items.push_back(markdownInlineText(Item->Children));
+    Obj["Items"] = std::move(Items);
+    return Obj;
+  }
+  if (const auto *H = llvm::dyn_cast<markdown::HeadingNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "Heading";
+    Obj["Level"] = static_cast<int64_t>(H->Level);
+    Obj["Text"] = markdownInlineText(H->Children);
+    return Obj;
+  }
+  if (llvm::isa<markdown::ThematicBreakNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "ThematicBreak";
+    return Obj;
+  }
+  if (const auto *BQ = llvm::dyn_cast<markdown::BlockQuoteNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "BlockQuote";
+    json::Array Children;
+    for (const auto *Child : BQ->Children)
+      if (auto ChildObj = serializeMarkdownNode(Child))
+        Children.push_back(std::move(*ChildObj));
+    Obj["Children"] = std::move(Children);
+    return Obj;
+  }
+  // A ParagraphNode holds the plain-text runs of a paragraph. Inside a block
+  // quote it is the only carrier of the quoted text, so serialize it here; the
+  // top-level loop skips it because that text is already in the Children array.
+  if (const auto *P = llvm::dyn_cast<markdown::ParagraphNode>(Node)) {
+    json::Object Obj;
+    Obj["Type"] = "Paragraph";
+    Obj["Text"] = markdownInlineText(P->Children);
+    return Obj;
+  }
+  return std::nullopt;
+}
+
 static Object serializeComment(const CommentInfo &I, Object &Description) {
   // taken from PR #142273
   Object Obj = Object();
@@ -329,6 +429,50 @@ static Object serializeComment(const CommentInfo &I, Object &Description) {
   case CommentKind::CK_ParagraphComment: {
     Child.insert({"Children", ChildArr});
     Child["ParagraphComment"] = true;
+
+    // Attempt to parse Markdown from a paragraph whose children are all plain
+    // text. Paragraphs that contain inline commands or HTML tags fall back to
+    // the raw Children array.
+    //
+    // Block commands like \brief, \return, and \param are
+    // CK_BlockCommandComment and CK_ParamCommandComment, handled in their own
+    // cases above. Their nested body paragraph still passes through here, but
+    // serializeDescription only promotes ParsedMarkdown from top-level
+    // paragraph comments, so a block command never contributes ParsedMarkdown
+    // to the output.
+    bool AllTextChildren = llvm::all_of(I.Children, [](const CommentInfo &C) {
+      return C.Kind == CommentKind::CK_TextComment;
+    });
+    if (AllTextChildren && !I.Children.empty()) {
+      std::string ParagraphText;
+      llvm::raw_string_ostream TextOS(ParagraphText);
+      for (const auto &C : I.Children)
+        if (!C.Text.empty())
+          TextOS << C.Text << "\n";
+
+      // Parse into the thread-local transient arena. The scope_exit guard
+      // resets that arena when this block ends. Every StringRef taken from the
+      // parsed nodes (Lang, Lines, table cells, and item or text contents) is
+      // copied into the JSON with .str() before the guard fires, so nothing in
+      // the JSON output points into arena memory once it is reset.
+      BumpPtrAllocator &Arena = getTransientArena();
+      scope_exit ArenaGuard([] { getTransientArena().Reset(); });
+      auto MDNodes = markdown::parseMarkdown(ParagraphText, Arena);
+
+      json::Array ParsedArray;
+      for (const auto *Node : MDNodes) {
+        // A top-level ParagraphNode wraps the plain-text runs of the paragraph,
+        // which are already serialized into the Children array above, so skip
+        // it here. (serializeMarkdownNode still serializes paragraphs nested
+        // inside block quotes, where the text is not otherwise represented.)
+        if (llvm::isa<markdown::ParagraphNode>(Node))
+          continue;
+        if (auto NodeObj = serializeMarkdownNode(Node))
+          ParsedArray.push_back(std::move(*NodeObj));
+      }
+      if (!ParsedArray.empty())
+        Child["ParsedMarkdown"] = std::move(ParsedArray);
+    }
     return Child;
   }
 
@@ -411,6 +555,7 @@ static void serializeDescription(const DocList<CommentInfo> &Description,
   // Skip straight to the FullComment's children
   auto &Comments = Description.front()->Children;
   Object DescriptionObj = Object();
+  json::Array ParsedMarkdown;
   for (const auto &CommentInfo : Comments) {
     json::Value Comment = serializeComment(CommentInfo, DescriptionObj);
     // if a ParagraphComment is returned, then it is a top-level comment that
@@ -422,8 +567,16 @@ static void serializeDescription(const DocList<CommentInfo> &Description,
           TextCommentsArray.getAsArray()->empty())
         continue;
       insertComment(DescriptionObj, TextCommentsArray, "ParagraphComments");
+      // Accumulate each paragraph's parsed nodes into one array instead of
+      // letting a later paragraph overwrite an earlier one's ParsedMarkdown.
+      if (auto *Parsed = ParagraphComment->get("ParsedMarkdown"))
+        if (auto *ParsedArr = Parsed->getAsArray())
+          for (auto &Node : *ParsedArr)
+            ParsedMarkdown.push_back(std::move(Node));
     }
   }
+  if (!ParsedMarkdown.empty())
+    DescriptionObj["ParsedMarkdown"] = std::move(ParsedMarkdown);
   Obj["Description"] = std::move(DescriptionObj);
   if (!Key.empty())
     Obj[Key] = true;
