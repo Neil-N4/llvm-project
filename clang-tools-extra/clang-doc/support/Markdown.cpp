@@ -221,6 +221,22 @@ DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
       continue;
     }
 
+    // ATX heading: 1-6 # characters followed by a space
+    if (Line.starts_with("#")) {
+      unsigned Level = 0;
+      while (Level < Line.size() && Line[Level] == '#')
+        ++Level;
+      if (Level <= 6 && Level < Line.size() && Line[Level] == ' ') {
+        llvm::StringRef Content = Line.drop_front(Level + 1).trim();
+        auto *Heading = Ctx.allocate<HeadingNode>(Level);
+        auto *TNode = Ctx.allocate<TextNode>(Ctx.internString(Content));
+        Heading->Children.push_back(*TNode);
+        Doc->Children.push_back(*Heading);
+        ++I;
+        continue;
+      }
+    }
+
     // Unordered list
     if (isListMarker(Line)) {
       auto *List = Ctx.allocate<UnorderedListNode>();
@@ -248,6 +264,8 @@ DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
       if (L.starts_with("```") || L.starts_with("~~~"))
         break;
       if (isListMarker(L))
+        break;
+      if (L.starts_with("#"))
         break;
       if (!ParaText.empty())
         ParaText += ' ';

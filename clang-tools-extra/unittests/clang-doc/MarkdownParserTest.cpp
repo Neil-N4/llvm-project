@@ -120,4 +120,22 @@ TEST(MarkdownParserTest, SingleItemList) {
   EXPECT_EQ(std::distance(List->Items.begin(), List->Items.end()), 1);
 }
 
+TEST(MarkdownParserTest, Heading1) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("# Hello", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  auto *H = llvm::cast<HeadingNode>(&Doc->Children.front());
+  EXPECT_EQ(H->getLevel(), 1u);
+  EXPECT_EQ(llvm::cast<TextNode>(H->Children.front()).getText(), "Hello");
+}
+
+TEST(MarkdownParserTest, Heading3) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("### Section", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  auto *H = llvm::cast<HeadingNode>(&Doc->Children.front());
+  EXPECT_EQ(H->getLevel(), 3u);
+  EXPECT_EQ(llvm::cast<TextNode>(H->Children.front()).getText(), "Section");
+}
+
 } // namespace
