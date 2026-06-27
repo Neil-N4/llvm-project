@@ -177,6 +177,11 @@ LLVM_DUMP_METHOD void DocumentNode::dump() const { print(llvm::errs()); }
 // Parser
 //===----------------------------------------------------------------------===//
 
+static bool isListMarker(llvm::StringRef Line) {
+  return Line.starts_with("- ") || Line.starts_with("* ") ||
+         Line.starts_with("+ ");
+}
+
 DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
   auto *Doc = Ctx.allocate<DocumentNode>();
   Ctx.setRoot(Doc);
@@ -216,6 +221,24 @@ DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
       continue;
     }
 
+    // Unordered list
+    if (isListMarker(Line)) {
+      auto *List = Ctx.allocate<UnorderedListNode>();
+      while (I < Lines.size()) {
+        llvm::StringRef L = Lines[I].trim();
+        if (!isListMarker(L))
+          break;
+        llvm::StringRef ItemText = L.drop_front(2).trim();
+        auto *Item = Ctx.allocate<ListItemNode>();
+        auto *TNode = Ctx.allocate<TextNode>(Ctx.internString(ItemText));
+        Item->Children.push_back(*TNode);
+        List->Items.push_back(*Item);
+        ++I;
+      }
+      Doc->Children.push_back(*List);
+      continue;
+    }
+
     // Plain text paragraph
     llvm::SmallString<256> ParaText;
     while (I < Lines.size()) {
@@ -223,6 +246,8 @@ DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
       if (L.empty())
         break;
       if (L.starts_with("```") || L.starts_with("~~~"))
+        break;
+      if (isListMarker(L))
         break;
       if (!ParaText.empty())
         ParaText += ' ';

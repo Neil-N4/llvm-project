@@ -101,4 +101,23 @@ TEST(MarkdownParserTest, TextThenFencedCode) {
   EXPECT_EQ(std::distance(Doc->Children.begin(), Doc->Children.end()), 2);
 }
 
+TEST(MarkdownParserTest, UnorderedList) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("- foo\n- bar\n- baz", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  auto *List = llvm::cast<UnorderedListNode>(&Doc->Children.front());
+  EXPECT_EQ(std::distance(List->Items.begin(), List->Items.end()), 3);
+  EXPECT_EQ(
+      llvm::cast<TextNode>(List->Items.front().Children.front()).getText(),
+      "foo");
+}
+
+TEST(MarkdownParserTest, SingleItemList) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("- only item", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  auto *List = llvm::cast<UnorderedListNode>(&Doc->Children.front());
+  EXPECT_EQ(std::distance(List->Items.begin(), List->Items.end()), 1);
+}
+
 } // namespace
