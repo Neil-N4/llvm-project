@@ -15,6 +15,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 #include <type_traits>
 
 namespace clang::doc::markdown {
@@ -32,7 +33,6 @@ enum class NodeKind {
   NK_Table,
   NK_UnorderedList,
   NK_OrderedList,
-  NK_ListItem,
   NK_BlockQuote,
   NK_ThematicBreak,
   NK_Document,
@@ -163,14 +163,13 @@ public:
 };
 static_assert(std::is_trivially_destructible_v<FencedCodeNode>);
 
-struct ListItemNode : BlockNode, llvm::ilist_node<ListItemNode> {
+// ListItemNode is not a BlockNode -- it only lives inside UnorderedListNode
+// and OrderedListNode, never directly in a BlockList.
+struct ListItemNode : llvm::ilist_node<ListItemNode> {
   InlineList Children;
-  ListItemNode() : BlockNode(NodeKind::NK_ListItem) {}
+  ListItemNode() = default;
   void print(llvm::raw_ostream &OS) const;
   LLVM_DUMP_METHOD void dump() const;
-  static bool classof(const BlockNode *N) {
-    return N->Kind == NodeKind::NK_ListItem;
-  }
 };
 
 struct UnorderedListNode : BlockNode {
@@ -235,7 +234,8 @@ struct DocumentNode : BlockNode {
 
 template <typename T>
 using IsMarkdownNode = std::enable_if_t<std::is_base_of_v<InlineNode, T> ||
-                                        std::is_base_of_v<BlockNode, T>>;
+                                        std::is_base_of_v<BlockNode, T> ||
+                                        std::is_same_v<T, ListItemNode>>;
 
 class ASTContext {
   llvm::BumpPtrAllocator Arena;
@@ -249,9 +249,19 @@ public:
     return new (Arena.Allocate<T>()) T(std::forward<Args>(args)...);
   }
 
+  llvm::StringRef internString(llvm::StringRef S) {
+    char *Buf = Arena.Allocate<char>(S.size());
+    std::copy(S.begin(), S.end(), Buf);
+    return llvm::StringRef(Buf, S.size());
+  }
+
   DocumentNode *getRoot() { return Root; }
   void setRoot(DocumentNode *R) { Root = R; }
 };
+
+/// Parse Markdown text into a DocumentNode. The caller provides an ASTContext
+/// that owns the lifetime of all allocated nodes.
+DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx);
 
 } // namespace clang::doc::markdown
 

@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "Markdown.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 
 namespace clang::doc::markdown {
@@ -85,9 +87,6 @@ void BlockNode::print(llvm::raw_ostream &OS) const {
     break;
   case NodeKind::NK_OrderedList:
     llvm::cast<OrderedListNode>(this)->print(OS);
-    break;
-  case NodeKind::NK_ListItem:
-    llvm::cast<ListItemNode>(this)->print(OS);
     break;
   case NodeKind::NK_BlockQuote:
     llvm::cast<BlockQuoteNode>(this)->print(OS);
@@ -173,5 +172,72 @@ void DocumentNode::print(llvm::raw_ostream &OS) const {
 }
 
 LLVM_DUMP_METHOD void DocumentNode::dump() const { print(llvm::errs()); }
+
+//===----------------------------------------------------------------------===//
+// Parser
+//===----------------------------------------------------------------------===//
+
+DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
+  auto *Doc = Ctx.allocate<DocumentNode>();
+  Ctx.setRoot(Doc);
+
+  llvm::SmallVector<llvm::StringRef> Lines;
+  Text.split(Lines, '\n');
+
+  size_t I = 0;
+  while (I < Lines.size()) {
+    llvm::StringRef Line = Lines[I].trim();
+
+    if (Line.empty()) {
+      ++I;
+      continue;
+    }
+
+    // Fenced code block
+    if (Line.starts_with("```") || Line.starts_with("~~~")) {
+      char Fence = Line[0];
+      llvm::StringRef Lang = Line.drop_front(3).trim();
+      ++I;
+      llvm::SmallString<256> Code;
+      while (I < Lines.size()) {
+        llvm::StringRef Trimmed = Lines[I].trim();
+        if (Trimmed.size() >= 3 && Trimmed[0] == Fence && Trimmed[1] == Fence &&
+            Trimmed[2] == Fence) {
+          ++I;
+          break;
+        }
+        if (!Code.empty())
+          Code += '\n';
+        Code += Lines[I];
+        ++I;
+      }
+      auto *Node = Ctx.allocate<FencedCodeNode>(Lang, Ctx.internString(Code));
+      Doc->Children.push_back(*Node);
+      continue;
+    }
+
+    // Plain text paragraph
+    llvm::SmallString<256> ParaText;
+    while (I < Lines.size()) {
+      llvm::StringRef L = Lines[I].trim();
+      if (L.empty())
+        break;
+      if (L.starts_with("```") || L.starts_with("~~~"))
+        break;
+      if (!ParaText.empty())
+        ParaText += ' ';
+      ParaText += L;
+      ++I;
+    }
+    if (!ParaText.empty()) {
+      auto *Para = Ctx.allocate<ParagraphNode>();
+      auto *TNode = Ctx.allocate<TextNode>(Ctx.internString(ParaText));
+      Para->Children.push_back(*TNode);
+      Doc->Children.push_back(*Para);
+    }
+  }
+
+  return Doc;
+}
 
 } // namespace clang::doc::markdown

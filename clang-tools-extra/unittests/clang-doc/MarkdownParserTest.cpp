@@ -21,9 +21,7 @@ TEST(MarkdownNodeTest, TextNode) {
 }
 
 TEST(MarkdownNodeTest, FencedCodeNode) {
-  FencedCodeNode N("cpp", R"(int x = 0;
-int y = 1;
-return x + y;)");
+  FencedCodeNode N("cpp", "int x = 0;\nint y = 1;");
   EXPECT_EQ(N.Kind, NodeKind::NK_FencedCode);
   EXPECT_EQ(N.getLang(), "cpp");
   EXPECT_TRUE(N.getCode().contains("int x = 0;"));
@@ -66,6 +64,41 @@ TEST(MarkdownNodeTest, ParagraphNode) {
   ParagraphNode N;
   EXPECT_EQ(N.Kind, NodeKind::NK_Paragraph);
   EXPECT_TRUE(N.Children.empty());
+}
+
+TEST(MarkdownParserTest, PlainText) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("hello world", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  ASSERT_FALSE(Doc->Children.empty());
+  auto *Para = llvm::cast<ParagraphNode>(&Doc->Children.front());
+  ASSERT_FALSE(Para->Children.empty());
+  EXPECT_EQ(llvm::cast<TextNode>(Para->Children.front()).getText(),
+            "hello world");
+}
+
+TEST(MarkdownParserTest, FencedCodeBlock) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("~~~cpp\nint x = 0;\n~~~", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  ASSERT_FALSE(Doc->Children.empty());
+  auto *Code = llvm::cast<FencedCodeNode>(&Doc->Children.front());
+  EXPECT_EQ(Code->getLang(), "cpp");
+  EXPECT_TRUE(Code->getCode().contains("int x = 0;"));
+}
+
+TEST(MarkdownParserTest, EmptyInput) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  EXPECT_TRUE(Doc->Children.empty());
+}
+
+TEST(MarkdownParserTest, TextThenFencedCode) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("some text\n\n~~~cpp\nint x = 0;\n~~~", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  EXPECT_EQ(std::distance(Doc->Children.begin(), Doc->Children.end()), 2);
 }
 
 } // namespace
