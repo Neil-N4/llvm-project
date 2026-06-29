@@ -138,4 +138,18 @@ TEST(MarkdownParserTest, Heading3) {
   EXPECT_EQ(llvm::cast<TextNode>(H->Children.front()).getText(), "Section");
 }
 
+TEST(MarkdownParserTest, ThematicBreakDashes) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("---", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  EXPECT_EQ(Doc->Children.front().Kind, NodeKind::NK_ThematicBreak);
+}
+
+TEST(MarkdownParserTest, ThematicBreakSpaced) {
+  ASTContext Ctx;
+  auto *Doc = parseMarkdown("- - -", Ctx);
+  ASSERT_NE(Doc, nullptr);
+  EXPECT_EQ(Doc->Children.front().Kind, NodeKind::NK_ThematicBreak);
+}
+
 } // namespace

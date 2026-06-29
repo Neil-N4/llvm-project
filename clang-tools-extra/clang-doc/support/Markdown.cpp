@@ -111,7 +111,9 @@ static bool isThematicBreak(llvm::StringRef Line) {
   char Marker = Line[0];
   if (Marker != '-' && Marker != '*' && Marker != '_')
     return false;
-  llvm::SmallString<3> Allowed = {Marker, ' '};
+  llvm::SmallString<8> Allowed;
+  Allowed += Marker;
+  Allowed += ' ';
   if (Line.find_first_not_of(llvm::StringRef(Allowed)) != llvm::StringRef::npos)
     return false;
   return Line.count(Marker) >= 3;
@@ -129,6 +131,15 @@ DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
     llvm::StringRef Line = Lines[I].trim();
 
     if (Line.empty()) {
+      ++I;
+      continue;
+    }
+
+    // Thematic break must come before list and fenced code checks since
+    // "---" and "- - -" would otherwise match those patterns first.
+    if (isThematicBreak(Line)) {
+      auto *Node = Ctx.allocate<ThematicBreakNode>();
+      Doc->Children.push_back(*Node);
       ++I;
       continue;
     }
@@ -170,14 +181,6 @@ DocumentNode *parseMarkdown(llvm::StringRef Text, ASTContext &Ctx) {
         ++I;
         continue;
       }
-    }
-
-    // Thematic break: 3+ of -, *, or _ optionally separated by spaces
-    if (isThematicBreak(Line)) {
-      auto *Node = Ctx.allocate<ThematicBreakNode>();
-      Doc->Children.push_back(*Node);
-      ++I;
-      continue;
     }
 
     // Unordered list

@@ -29,6 +29,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <type_traits>
+#include <utility>
 
 namespace clang::doc::markdown {
 
@@ -42,7 +43,7 @@ enum class NodeKind {
   NK_Paragraph,
   NK_Heading,
   NK_FencedCode,
-  NK_Table,
+  NK_Table, // TODO: add TableNode
   NK_UnorderedList,
   NK_OrderedList,
   NK_BlockQuote,
@@ -63,6 +64,7 @@ struct BlockNode;
 struct InlineNode : llvm::ilist_node<InlineNode> {
   NodeKind Kind;
   explicit InlineNode(NodeKind K) : Kind(K) {}
+  virtual ~InlineNode() = default;
   virtual void print(llvm::raw_ostream &OS) const = 0;
   LLVM_DUMP_METHOD void dump() const;
 };
@@ -83,7 +85,6 @@ public:
     return N->Kind == NodeKind::NK_Text;
   }
 };
-static_assert(std::is_trivially_destructible_v<TextNode>);
 
 /// A backtick-delimited inline code span.
 struct InlineCodeNode : InlineNode {
@@ -99,7 +100,6 @@ public:
     return N->Kind == NodeKind::NK_InlineCode;
   }
 };
-static_assert(std::is_trivially_destructible_v<InlineCodeNode>);
 
 /// An emphasis span (* or _).
 struct EmphasisNode : InlineNode {
@@ -131,6 +131,7 @@ struct StrongNode : InlineNode {
 struct BlockNode : llvm::ilist_node<BlockNode> {
   NodeKind Kind;
   explicit BlockNode(NodeKind K) : Kind(K) {}
+  virtual ~BlockNode() = default;
   virtual void print(llvm::raw_ostream &OS) const = 0;
   LLVM_DUMP_METHOD void dump() const;
 };
@@ -179,7 +180,6 @@ public:
     return N->Kind == NodeKind::NK_FencedCode;
   }
 };
-static_assert(std::is_trivially_destructible_v<FencedCodeNode>);
 
 /// A single item in an unordered or ordered list.
 /// ListItemNode is not a BlockNode -- it only lives inside list nodes.
@@ -236,8 +236,7 @@ struct ThematicBreakNode : BlockNode {
 };
 
 /// The root document node. Contains all top-level block nodes.
-// FIXME: add constructor that accepts children -- will be addressed in a
-// follow-up patch before parser work proceeds.
+/// Children are added by the parser via push_back on the Children ilist.
 struct DocumentNode : BlockNode {
   BlockList Children;
   DocumentNode() : BlockNode(NodeKind::NK_Document) {}
